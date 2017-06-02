@@ -1,6 +1,13 @@
 ## Spark MLLib on EMR
 
 
+This tutorial is based on Guy Ernest's blog "Building a Recommendation Engine with Spark ML on Amazon EMR using Zeppelin", with some modifications of the setting and update of the versions.
+
+The following is the link of the blog:
+
+<https://aws.amazon.com/cn/blogs/big-data/building-a-recommendation-engine-with-spark-ml-on-amazon-emr-using-zeppelin/>
+
+
 ### 1. Launch the cluster:
 
 Login to AWS and open the console of EMR.
@@ -203,7 +210,163 @@ And the following is the screen dump of the home page:
 
 You can click the "Create new note" link to create your note book and start to run your Machine Learning code.
 
+To run the recommendation demo, you can create a new note book and copy the sample code from the original blog:
 
+<https://aws.amazon.com/cn/blogs/big-data/building-a-recommendation-engine-with-spark-ml-on-amazon-emr-using-zeppelin/>
+
+To save your time, you can just download the sample I created and then import it to your Zeppelin with the "Import note" link on the home page of Zeppelin.
+
+The download link of the sample note book is:
+<https://github.com/DamonDeng/SparkMLLib_tutorial/blob/master/getting_start/ML_test.json>
+
+It is a json file, download it to you laptop, and then click the "Import note" link on Zeppelin home page to import the json file you just downloaded.
+
+
+After you import it, you will see something like this:
+
+![](img/sample_code.png)
+
+Click the "Run All Paragraphs" button, which is a triangle icon, to run whole sample.
+
+The following is the explanation of the code:
+
+
+The following code import all the necessary libaries:
+
+	import java.io.File
+	import scala.io.Source
+	
+	import org.apache.log4j.Logger
+	import org.apache.log4j.Level
+	
+	import org.apache.spark.SparkConf
+	import org.apache.spark.SparkContext
+	import org.apache.spark.SparkContext._
+	import org.apache.spark.rdd._
+	import org.apache.spark.mllib.recommendation.{ALS, Rating, MatrixFactorizationModel}
+
+The we start to load the sample data set:
+
+	//val movieLensHomeDir = "s3://emr.examples/movieLens/"
+	val movieLensHomeDir = "s3://spark.tk.damondeng.com/dataset/ml10m/"
+	
+	val movies = sc.textFile(movieLensHomeDir + "movies.dat").map { line =>
+	  val fields = line.split("::")
+	  // format: (movieId, movieName)
+	  (fields(0).toInt, fields(1))
+	}.collect.toMap
+	
+	val ratings = sc.textFile(movieLensHomeDir + "ratings.dat").map { line =>
+	  val fields = line.split("::")
+	  // format: (timestamp % 10, Rating(userId, movieId, rating))
+	  (fields(3).toLong % 10, Rating(fields(0).toInt, fields(1).toInt, fields(2).toDouble))
+	}
+
+The original URL link of the sample is <s3://emr.examples/movieLens/>,
+which you may not have right to access. You can use the mirror link:
+<s3://spark.tk.damondeng.com/dataset/ml10m/>.
+
+Then we print out the numbers of the training data, it is a good practice to  check the training data before you really train your model.
+	
+	val numRatings = ratings.count
+	val numUsers = ratings.map(_._2.user).distinct.count
+	val numMovies = ratings.map(_._2.product).distinct.count
+	
+	println("Got " + numRatings + " ratings from "
+	  + numUsers + " users on " + numMovies + " movies.")
+
+
+Then we split the data into training set, validation set and testing set based on the first field of ratings, which is an integer between 0 and 9.
+	
+	val training = ratings.filter(x => x._1 < 6)
+	  .values
+	  .cache()
+	val validation = ratings.filter(x => x._1 >= 6 && x._1 < 8)
+	  .values
+	  .cache()
+	val test = ratings.filter(x => x._1 >= 8).values.cache()
+	
+	val numTraining = training.count()
+	val numValidation = validation.count()
+	val numTest = test.count()
+	
+	println("Training: " + numTraining + ", validation: " + numValidation + ", test: " + numTest)
+
+
+Then define Root Mean Squared Error method:
+
+	/** Compute RMSE (Root Mean Squared Error). */
+	def computeRmse(model: MatrixFactorizationModel, data: RDD[Rating], n: Long): Double = {
+	    val predictions: RDD[Rating] = model.predict(data.map(x => (x.user, x.product)))
+	    val predictionsAndRatings = predictions.map(x => ((x.user, x.product), x.rating))
+	    .join(data.map(x => ((x.user, x.product), x.rating))).values
+	    math.sqrt(predictionsAndRatings.map(x => (x._1 - x._2) * (x._1 - x._2)).reduce(_ + _) / n)
+	}
+	
+Now, we can try to train it:
+
+	val ranks = List(8, 12)
+	val lambdas = List(0.1, 10.0)
+	val numIters = List(10, 20)
+	var bestModel: Option[MatrixFactorizationModel] = None
+	var bestValidationRmse = Double.MaxValue
+	var bestRank = 0
+	var bestLambda = -1.0
+	var bestNumIter = -1
+	for (rank <- ranks; lambda <- lambdas; numIter <- numIters) {
+	  val model = ALS.train(training, rank, numIter, lambda)
+	  val validationRmse = computeRmse(model, validation, numValidation)
+	  println("RMSE (validation) = " + validationRmse + " for the model trained with rank = " 
+	    + rank + ", lambda = " + lambda + ", and numIter = " + numIter + ".")
+	  if (validationRmse < bestValidationRmse) {
+	    bestModel = Some(model)
+	    bestValidationRmse = validationRmse
+	    bestRank = rank
+	    bestLambda = lambda
+	    bestNumIter = numIter
+	  }
+	}
+
+You will get output like the following, telling you the result of the training:
+
+	ranks: List[Int] = List(8, 12)
+	lambdas: List[Double] = List(0.1, 10.0)
+	numIters: List[Int] = List(10, 20)
+	bestModel: Option[org.apache.spark.mllib.recommendation.MatrixFactorizationModel] = None
+	bestValidationRmse: Double = 1.7976931348623157E308
+	bestRank: Int = 0
+	bestLambda: Double = -1.0
+	bestNumIter: Int = -1
+	RMSE (validation) = 0.82452138173397 for the model trained with rank = 8, lambda = 0.1, and numIter = 10.
+	RMSE (validation) = 0.818067307675006 for the model trained with rank = 8, lambda = 0.1, and numIter = 20.
+	RMSE (validation) = 3.667982949261605 for the model trained with rank = 8, lambda = 10.0, and numIter = 10.
+	RMSE (validation) = 3.667982949261605 for the model trained with rank = 8, lambda = 10.0, and numIter = 20.
+	RMSE (validation) = 0.8209511941203284 for the model trained with rank = 12, lambda = 0.1, and numIter = 10.
+	RMSE (validation) = 0.8158746540629233 for the model trained with rank = 12, lambda = 0.1, and numIter = 20.
+	RMSE (validation) = 3.667982949261605 for the model trained with rank = 12, lambda = 10.0, and numIter = 10.
+	RMSE (validation) = 3.667982949261605 for the model trained with rank = 12, lambda = 10.0, and numIter = 20.
+
+After we train the model, we can try to predict movies recommendations with the model:
+
+	val candidates = sc.parallelize(movies.keys.toSeq)
+	val recommendations = bestModel.get
+	  .predict(candidates.map((100, _)))
+	  .collect()
+	  .sortBy(- _.rating)
+	  .take(10)
+	
+	var i = 1
+	println("Movies recommended for you:")
+	recommendations.foreach { r =>
+	  println("%2d".format(i) + ": " + movies(r.product))
+	  i += 1
+	}
+
+Then you can save your best model to S3:
+	
+	// Save and load model
+	bestModel.get.save(sc, "s3://spark.tk.damondeng.com/movieLens/model/recommendation")
+	val sameModel = MatrixFactorizationModel.load(sc,  "s3://spark.tk.damondeng.com/movieLens/model/recommendation")
 
 
 
